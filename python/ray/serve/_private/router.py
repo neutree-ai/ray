@@ -497,6 +497,7 @@ class AsyncioRouter:
         result: Union[Any, RayError],
     ):
         self._metrics_manager.dec_num_running_requests_for_replica(replica_id)
+        self._replica_scheduler.on_request_completed(replica_id)
         if isinstance(result, ActorDiedError):
             # Replica has died but controller hasn't notified the router yet.
             # Don't consider this replica for requests in the future, and retry

@@ -51,3 +51,17 @@ class ReplicaScheduler(ABC):
     @abstractmethod
     def curr_replicas(self) -> Dict[ReplicaID, RunningReplica]:
         pass
+
+    def on_request_completed(self, replica_id: ReplicaID) -> None:
+        """Called when a request completes on a replica.
+
+        This is an optional callback that schedulers can override to track
+        request completion events and update their internal state.
+
+        The default implementation is a no-op, so existing schedulers that
+        don't need this callback don't have to implement it.
+
+        Args:
+            replica_id: The ID of the replica where the request completed.
+        """
+        pass
