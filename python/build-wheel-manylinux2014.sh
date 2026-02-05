@@ -6,23 +6,25 @@ set -exuo pipefail
 HOST_UID=${HOST_UID:-$(id -u)}
 HOST_GID=${HOST_GID:-$(id -g)}
 
-if [ "$EUID" -eq 0 ]; then
+yum -y install sudo
 
-  # Install sudo
-  yum -y install sudo
+# if [ "$EUID" -eq 0 ]; then
 
-  # Create group and user
-  groupadd -g "$HOST_GID" builduser
-  useradd -m -u "$HOST_UID" -g "$HOST_GID" -d /ray builduser
+#   # Install sudo
+#   yum -y install sudo
 
-  # Give sudo access
-  echo "builduser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+#   # Create group and user
+#   groupadd -g "$HOST_GID" builduser
+#   useradd -m -u "$HOST_UID" -g "$HOST_GID" -d /ray builduser
 
-  exec sudo -E -u builduser HOME="$HOME" bash "$0" "$@"
+#   # Give sudo access
+#   echo "builduser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
-  exit 0
+#   exec sudo -E -u builduser HOME="$HOME" bash "$0" "$@"
 
-fi
+#   exit 0
+
+# fi
 
 export RAY_INSTALL_JAVA="${RAY_INSTALL_JAVA:-0}"
 
