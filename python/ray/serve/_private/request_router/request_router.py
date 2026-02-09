@@ -1242,3 +1242,21 @@ class RequestRouter(ABC):
         after a response is generated.
         """
         pass
+
+    def on_request_completed(
+        self,
+        replica_id: ReplicaID,
+        internal_request_id: str,
+    ) -> None:
+        """Called when a request to a replica has completed.
+
+        This lifecycle hook is called after a request finishes (successfully or
+        with an error). It can be used by request routers that need to perform
+        cleanup after a request completes, such as releasing capacity tokens.
+
+        Args:
+            replica_id: The ID of the replica that handled the request.
+            internal_request_id: The internal unique identifier for the request
+                (from RequestMetadata.internal_request_id).
+        """
+        pass
