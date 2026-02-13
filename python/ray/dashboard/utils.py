@@ -9,7 +9,7 @@ import os
 import pkgutil
 from abc import ABCMeta, abstractmethod
 from base64 import b64decode
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -606,6 +606,33 @@ class ImmutableDict(Immutable, Mapping):
 
     def __repr__(self):
         return "%s(%s)" % (self.__class__.__name__, dict.__repr__(self._dict))
+
+
+class Dict(ImmutableDict, MutableMapping):
+    """A mutable dict that wraps values as ImmutableDict on access.
+
+    This prevents to_google_style from recursing into nested dicts
+    (like protobuf map field values with user-defined data keys such as
+    resource names), because ImmutableDict is not a dict subclass.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(dict(*args, **kwargs))
+
+    def __setitem__(self, key, value):
+        self._dict[key] = value
+        self._proxy.pop(key, None)
+
+    def __delitem__(self, key):
+        self._dict.pop(key, None)
+        self._proxy.pop(key, None)
+
+    def reset(self, d):
+        assert isinstance(d, Mapping)
+        for key in self._dict.keys() - d.keys():
+            del self[key]
+        for key, value in d.items():
+            self[key] = value
 
 
 # Register immutable types.
