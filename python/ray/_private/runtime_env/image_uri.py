@@ -9,10 +9,29 @@ from ray._private.runtime_env.plugin import RuntimeEnvPlugin
 
 default_logger = logging.getLogger(__name__)
 
+_CONTAINER_RUNTIME_ENV_VAR = "RAY_EXPERIMENTAL_RUNTIME_ENV_CONTAINER_RUNTIME"
+
+
+def _get_container_runtime() -> str:
+    """Get the container runtime to use.
+
+    Returns "docker" or "podman" based on the
+    RAY_EXPERIMENTAL_RUNTIME_ENV_CONTAINER_RUNTIME environment variable.
+    Defaults to "podman" for backward compatibility.
+    """
+    runtime = os.environ.get(_CONTAINER_RUNTIME_ENV_VAR, "podman").lower()
+    if runtime not in ("docker", "podman"):
+        raise ValueError(
+            f"Invalid {_CONTAINER_RUNTIME_ENV_VAR} value: '{runtime}'. "
+            "Must be 'docker' or 'podman'."
+        )
+    return runtime
+
 
 async def _create_impl(image_uri: str, logger: logging.Logger):
     # Pull image if it doesn't exist
     # Also get path to `default_worker.py` inside the image.
+    container_runtime = _get_container_runtime()
     with tempfile.TemporaryDirectory() as tmpdir:
         os.chmod(tmpdir, 0o777)
         result_file = os.path.join(tmpdir, "worker_path.txt")
@@ -21,12 +40,18 @@ import ray._private.workers.default_worker as dw
 with open('/shared/worker_path.txt', 'w') as f:
     f.write(dw.__file__)
 """
+        # Use `:Z` volume flag only for podman (SELinux rootless support)
+        volume_mount = (
+            f"{tmpdir}:/shared:Z"
+            if container_runtime == "podman"
+            else f"{tmpdir}:/shared"
+        )
         cmd = [
-            "podman",
+            container_runtime,
             "run",
             "--rm",
             "-v",
-            f"{tmpdir}:/shared:Z",
+            volume_mount,
             image_uri,
             "python",
             "-c",
@@ -43,7 +68,7 @@ with open('/shared/worker_path.txt', 'w') as f:
 
         if process.returncode != 0:
             raise RuntimeError(
-                f"Podman command failed: cmd={cmd}, returncode={process.returncode}, stdout={stdout.decode()}, stderr={stderr.decode()}"
+                f"{container_runtime} command failed: cmd={cmd}, returncode={process.returncode}, stdout={stdout.decode()}, stderr={stderr.decode()}"
             )
 
         if not os.path.exists(result_file):
@@ -73,27 +98,27 @@ def _modify_context_impl(
 ):
     context.override_worker_entrypoint = worker_path
 
-    container_driver = "podman"
+    container_runtime = _get_container_runtime()
     container_command = [
-        container_driver,
+        container_runtime,
         "run",
         "-v",
         ray_tmp_dir + ":" + ray_tmp_dir,
-        "--cgroup-manager=cgroupfs",
         "--network=host",
         "--pid=host",
         "--ipc=host",
-        # NOTE(zcin): Mounted volumes in rootless containers are
-        # owned by the user `root`. The user on host (which will
-        # usually be `ray` if this is being run in a ray docker
-        # image) who started the container is mapped using user
-        # namespaces to the user `root` in a rootless container. In
-        # order for the Ray Python worker to access the mounted ray
-        # tmp dir, we need to use keep-id mode which maps the user
-        # as itself (instead of as `root`) into the container.
-        # https://www.redhat.com/sysadmin/rootless-podman-user-namespace-modes
-        "--userns=keep-id",
     ]
+
+    # Podman-specific flags for rootless container support.
+    # --cgroup-manager=cgroupfs: use cgroupfs for cgroup management.
+    # --userns=keep-id: maps the user as itself (instead of as root)
+    # into the container, so that mounted volumes are accessible.
+    # https://www.redhat.com/sysadmin/rootless-podman-user-namespace-modes
+    if container_runtime == "podman":
+        container_command.extend([
+            "--cgroup-manager=cgroupfs",
+            "--userns=keep-id",
+        ])
 
     # Environment variables to set in container
     env_vars = dict()
@@ -126,10 +151,14 @@ def _modify_context_impl(
     container_command.append("python")
     container_command.append(image_uri)
 
-    # Example:
-    # podman run -v /tmp/ray:/tmp/ray
-    # --cgroup-manager=cgroupfs --network=host --pid=host --ipc=host
-    # --userns=keep-id --env RAY_RAYLET_PID=23478 --env RAY_JOB_ID=$RAY_JOB_ID
+    # Example (podman):
+    # podman run -v /tmp/ray:/tmp/ray --network=host --pid=host --ipc=host
+    # --cgroup-manager=cgroupfs --userns=keep-id
+    # --env RAY_RAYLET_PID=23478 --env RAY_JOB_ID=$RAY_JOB_ID
+    # --entrypoint python rayproject/ray:nightly-py39
+    # Example (docker):
+    # docker run -v /tmp/ray:/tmp/ray --network=host --pid=host --ipc=host
+    # --env RAY_RAYLET_PID=23478 --env RAY_JOB_ID=$RAY_JOB_ID
     # --entrypoint python rayproject/ray:nightly-py39
     container_command_str = " ".join(container_command)
     logger.info(f"Starting worker in container with prefix {container_command_str}")
