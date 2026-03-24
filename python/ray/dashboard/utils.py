@@ -624,11 +624,14 @@ class Dict(ImmutableDict, MutableMapping):
         self._proxy.pop(key, None)
 
     def __delitem__(self, key):
-        self._dict.pop(key, None)
+        del self._dict[key]
         self._proxy.pop(key, None)
 
     def reset(self, d):
-        assert isinstance(d, Mapping)
+        if not isinstance(d, Mapping):
+            raise TypeError(
+                f"Dict.reset() expected a Mapping, got {type(d).__name__}"
+            )
         for key in self._dict.keys() - d.keys():
             del self[key]
         for key, value in d.items():

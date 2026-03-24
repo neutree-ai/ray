@@ -739,9 +739,15 @@ class AsyncioRouter:
         if RAY_SERVE_COLLECT_AUTOSCALING_METRICS_ON_HANDLE:
             self._metrics_manager.dec_num_running_requests_for_replica(replica_id)
 
-        # Notify request router that request completed (for cleanup, e.g., token release)
+        # Notify request router that request completed (for cleanup, e.g., token release).
+        # This callback may be invoked from a non-asyncio C++ thread, so schedule
+        # the hook on the event loop to ensure thread-safety for router implementations.
         if self.request_router:
-            self.request_router.on_request_completed(replica_id, internal_request_id)
+            self._event_loop.call_soon_threadsafe(
+                self.request_router.on_request_completed,
+                replica_id,
+                internal_request_id,
+            )
         if isinstance(result, ActorDiedError):
             # Replica has died but controller hasn't notified the router yet.
             # Don't consider this replica for requests in the future, and retry
