@@ -107,6 +107,12 @@ def test_set_current_process_visible_accelerator_ids(shutdown_only):
     Accelerator.set_current_process_visible_accelerator_ids(["0", "1", "2"])
     assert os.environ["ASCEND_RT_VISIBLE_DEVICES"] == "0,1,2"
 
+    Accelerator.set_current_process_visible_accelerator_ids(["2", "0", "1"])
+    assert os.environ["ASCEND_RT_VISIBLE_DEVICES"] == "0,1,2"
+
+    Accelerator.set_current_process_visible_accelerator_ids(["10", "2", "1"])
+    assert os.environ["ASCEND_RT_VISIBLE_DEVICES"] == "1,2,10"
+
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Not supported mock on Windows")
 @pytest.mark.skipif(
