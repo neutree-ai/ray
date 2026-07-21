@@ -195,6 +195,17 @@ class OpencensusProxyMetric:
         for series in timeseries:
             labels = tuple(val.value for val in series.label_values)
 
+            if len(labels) != len(self._label_keys):
+                logger.warning(
+                    "Metric %s: label_keys(%d) != label_values(%d). "
+                    "keys=%s, values=%s",
+                    self._name,
+                    len(self._label_keys),
+                    len(labels),
+                    self._label_keys,
+                    labels,
+                )
+
             # Aggregate points.
             for point in series.points:
                 if (
@@ -271,6 +282,33 @@ class Component:
                 self._metrics[name] = OpencensusProxyMetric(
                     name, descriptor.description, descriptor.unit, label_keys
                 )
+            elif len(label_keys) > len(self._metrics[name].label_keys):
+                # Metric descriptor updated with additional labels
+                # (e.g., vLLM added ReplicaId in v0.12.0). Migrate
+                # existing data to match the new label key positions
+                # by name, filling missing labels with empty strings.
+                old_keys = self._metrics[name]._label_keys
+                new_pos = {k: i for i, k in enumerate(label_keys)}
+                migrated = {}
+                for old_vals, data in self._metrics[name]._data.items():
+                    new_vals = [""] * len(label_keys)
+                    for old_i, old_key in enumerate(old_keys):
+                        dst = new_pos.get(old_key)
+                        if dst is not None and old_i < len(old_vals):
+                            new_vals[dst] = old_vals[old_i]
+                    migrated[tuple(new_vals)] = data
+                logger.warning(
+                    "Metric %s label keys updated from %d to %d, "
+                    "migrated %d data points. old_keys=%s, new_keys=%s",
+                    name,
+                    len(old_keys),
+                    len(label_keys),
+                    len(migrated),
+                    old_keys,
+                    label_keys,
+                )
+                self._metrics[name]._data = migrated
+                self._metrics[name]._label_keys = label_keys
             self._metrics[name].record(metric)
 
 
@@ -371,7 +409,22 @@ class OpenCensusProxyCollector:
         """
         assert self._components_lock.locked()
         metric_name = f"{self._namespace}_{metric_name}"
-        assert len(label_values) == len(label_keys), (label_values, label_keys)
+        if len(label_values) != len(label_keys):
+            # Label alignment is handled in collect() via key-name
+            # matching for regular metrics. Remaining mismatches here
+            # are either from cache_config_info (dynamic labels from
+            # __dict__ that vary across versions) or unexpected cases.
+            logger.warning(
+                "Metric %s has mismatched label keys (%d) and "
+                "label values (%d), skipping this data point. "
+                "keys=%s, values=%s",
+                metric_name,
+                len(label_keys),
+                len(label_values),
+                label_keys,
+                label_values,
+            )
+            return
         # Prometheus requires that all tag values be strings hence
         # the need to cast none to the empty string before exporting. See
         # https://github.com/census-instrumentation/opencensus-python/issues/480
@@ -524,47 +577,59 @@ class OpenCensusProxyCollector:
             A list of per-node metrics for the same metric name, with the high
             cardinality labels removed and the values aggregated.
         """
-        metric = next(iter(per_worker_metrics), None)
-        if not metric or WORKER_ID_TAG_KEY not in metric.label_keys:
-            # No high cardinality labels, return the original metrics.
-            return per_worker_metrics
-
-        worker_id_label_index = metric.label_keys.index(WORKER_ID_TAG_KEY)
-        # map from the tuple of label values without worker_id to the list of per worker
-        # task metrics
-        label_value_to_data: Dict[
-            Tuple,
-            List[
-                Union[
-                    LastValueAggregationData,
-                    CountAggregationData,
-                    SumAggregationData,
-                ]
-            ],
-        ] = defaultdict(list)
-        for metric in per_worker_metrics:
-            for label_values, data in metric.data.items():
-                # remove the worker_id from the label values
-                label_value_to_data[
-                    label_values[:worker_id_label_index]
-                    + label_values[worker_id_label_index + 1 :]
-                ].append(data)
-
-        aggregated_metric = OpencensusProxyMetric(
-            name=metric.name,
-            desc=metric.desc,
-            unit=metric.unit,
-            # remove the worker_id from the label keys
-            label_keys=metric.label_keys[:worker_id_label_index]
-            + metric.label_keys[worker_id_label_index + 1 :],
+        # Group metrics by label_keys so that workers with different label
+        # sets (e.g., different library versions) are aggregated separately.
+        # Without grouping, the old code used the first worker's WorkerId
+        # index to slice ALL workers' data and the last worker's label_keys
+        # for the result — causing mismatches when label sets differ.
+        groups: Dict[Tuple[str, ...], List[OpencensusProxyMetric]] = defaultdict(
+            list
         )
-        for label_values, datas in label_value_to_data.items():
-            aggregated_metric.add_data(
-                label_values,
-                self._aggregate_metric_data(datas),
-            )
+        for metric in per_worker_metrics:
+            groups[tuple(metric.label_keys)].append(metric)
 
-        return [aggregated_metric]
+        results = []
+        for label_keys_tuple, metrics in groups.items():
+            label_keys = list(label_keys_tuple)
+            if WORKER_ID_TAG_KEY not in label_keys:
+                # No high cardinality labels, return as-is.
+                results.extend(metrics)
+                continue
+
+            worker_id_label_index = label_keys.index(WORKER_ID_TAG_KEY)
+            label_value_to_data: Dict[
+                Tuple,
+                List[
+                    Union[
+                        LastValueAggregationData,
+                        CountAggregationData,
+                        SumAggregationData,
+                    ]
+                ],
+            ] = defaultdict(list)
+            for metric in metrics:
+                for label_values, data in metric.data.items():
+                    label_value_to_data[
+                        label_values[:worker_id_label_index]
+                        + label_values[worker_id_label_index + 1 :]
+                    ].append(data)
+
+            sample = metrics[0]
+            aggregated_metric = OpencensusProxyMetric(
+                name=sample.name,
+                desc=sample.desc,
+                unit=sample.unit,
+                label_keys=label_keys[:worker_id_label_index]
+                + label_keys[worker_id_label_index + 1 :],
+            )
+            for label_values, datas in label_value_to_data.items():
+                aggregated_metric.add_data(
+                    label_values,
+                    self._aggregate_metric_data(datas),
+                )
+            results.append(aggregated_metric)
+
+        return results
 
     def collect(self):  # pragma: NO COVER
         """Collect fetches the statistics from OpenCensus
@@ -607,13 +672,60 @@ class OpenCensusProxyCollector:
                     )
                 )
 
+            # Pre-scan to find canonical (longest) label_keys for each
+            # metric name. When different workers run different library
+            # versions (e.g., vLLM v0.11 vs v0.17), the same metric may
+            # have different label sets. Using the longest ensures we can
+            # pad shorter label_values with empty strings instead of
+            # dropping the data point entirely.
+            canonical_label_keys: Dict[str, List[str]] = {}
+            for metric in open_cencus_metrics:
+                existing = canonical_label_keys.get(metric.name)
+                if existing is None or len(metric.label_keys) > len(existing):
+                    canonical_label_keys[metric.name] = metric.label_keys
+
             prometheus_metrics_map = {}
             for metric in open_cencus_metrics:
+                canon_keys = canonical_label_keys.get(
+                    metric.name, metric.label_keys
+                )
+                # Build position mapping when this metric's label_keys
+                # differ from the canonical set (e.g., a component
+                # running an older library version with fewer labels).
+                need_align = (
+                    metric.label_keys != canon_keys
+                    and len(metric.label_keys) <= len(canon_keys)
+                )
+                if need_align:
+                    canon_pos = {k: i for i, k in enumerate(canon_keys)}
+                    src_to_dst = [
+                        canon_pos.get(k) for k in metric.label_keys
+                    ]
+                    logger.warning(
+                        "Metric %s needs cross-component alignment: "
+                        "metric_keys(%d)=%s, canon_keys(%d)=%s",
+                        metric.name,
+                        len(metric.label_keys),
+                        metric.label_keys,
+                        len(canon_keys),
+                        canon_keys,
+                    )
+
                 for label_values, data in metric.data.items():
+                    if need_align:
+                        aligned = [""] * len(canon_keys)
+                        for src_i, dst_i in enumerate(src_to_dst):
+                            if (
+                                dst_i is not None
+                                and src_i < len(label_values)
+                            ):
+                                aligned[dst_i] = label_values[src_i]
+                        label_values = tuple(aligned)
+
                     self.to_prometheus_metrics(
                         metric.name,
                         metric.desc,
-                        metric.label_keys,
+                        canon_keys,
                         metric.unit,
                         label_values,
                         data,

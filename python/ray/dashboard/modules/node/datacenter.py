@@ -9,6 +9,7 @@ from ray._private.utils import (
     parse_pg_formatted_resources_to_original,
 )
 from ray.dashboard.utils import (
+    Dict,
     async_loop_forever,
     compose_state_message,
 )
@@ -16,23 +17,24 @@ from ray.dashboard.utils import (
 logger = logging.getLogger(__name__)
 
 
+# NOT thread safe. Every assignment must be on the main event loop thread.
 class DataSource:
     # {node id hex(str): node stats(dict of GetNodeStatsReply
     # in node_manager.proto)}
-    node_stats = {}
+    node_stats = Dict()
     # {node id hex(str): node physical stats(dict from reporter_agent.py)}
-    node_physical_stats = {}
+    node_physical_stats = Dict()
     # {actor id hex(str): actor table data(dict of ActorTableData
     # in gcs.proto)}
     actors = {}
     # {node id hex(str): gcs node info(dict of GcsNodeInfo in gcs.proto)}
-    nodes = {}
+    nodes = Dict()
     # {node id hex(str): worker list}
-    node_workers = {}
+    node_workers = Dict()
     # {node id hex(str): {actor id hex(str): actor table data}}
     node_actors = {}
     # {worker id(str): core worker stats}
-    core_worker_stats = {}
+    core_worker_stats = Dict()
 
 
 class DataOrganizer:
@@ -93,8 +95,8 @@ class DataOrganizer:
 
             node_workers[node_id] = workers
 
-        DataSource.node_workers = node_workers
-        DataSource.core_worker_stats = core_worker_stats
+        DataSource.node_workers.reset(node_workers)
+        DataSource.core_worker_stats.reset(core_worker_stats)
 
     @classmethod
     def _extract_workers_for_node(cls, node_physical_stats, node_stats):
